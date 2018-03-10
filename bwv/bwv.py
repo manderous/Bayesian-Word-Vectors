@@ -9,21 +9,22 @@ def sigmoid(x):
 
 class WordData:
     def __init__(self, text, m=50):
+
         self.text = text
         self.vector_size = m
 
-        self.mean_u = np.random.randn(m,1)
-        self.mean_v = np.random.randn(m,1)
         self.covariance_u = np.identity(m)
         self.covariance_v = np.identity(m)
+        self.mean_u = np.random.randn(m,1)
+        self.mean_v = np.random.randn(m,1)
 
         self.P_u = np.identity(m)
         self.P_v = np.identity(m)
-        self.P_u_new = np.zeros((m,m))
-        self.P_v_new = np.zeros((m,m))
-
         self.R_u = np.zeros((m,1))
         self.R_v = np.zeros((m,1))
+
+        self.P_u_new = np.zeros((m,m))
+        self.P_v_new = np.zeros((m,m))
         self.R_u_new = np.zeros((m,1))
         self.R_v_new = np.zeros((m,1))
 
@@ -41,8 +42,8 @@ class WordData:
         self.covariance_u = np.diag(np.diagonal(self.covariance_u))
 
         # clear new values.
-        self.R_u_new = np.zeros((m,1))
-        self.P_u_new = np.zeros((m,m))
+        self.R_u_new = np.zeros((self.vector_size,1))
+        self.P_u_new = np.zeros((self.vector_size,self.vector_size))
 
     def v_parameter_update(self, beta):
 
@@ -58,11 +59,11 @@ class WordData:
         self.covariance_v = np.diag(np.diagonal(self.covariance_v))
 
         # clear new values.
-        self.R_v_new = np.zeros((m,1))
-        self.P_v_new = np.zeros((m,m))
+        self.R_v_new = np.zeros((self.vector_size,1))
+        self.P_v_new = np.zeros((self.vector_size,self.vector_size))
 
 class BWV:
-    def __init__(self, corpus, m=40, tau=0.0, gamma=0.7, n_without_stochastic_update=5):
+    def __init__(self, corpus, m=40, tau=1.0, gamma=0.7, n_without_stochastic_update=5):
 
         self.m = m
         self.tau = tau * np.identity(m)
@@ -71,7 +72,7 @@ class BWV:
         self.epoch = 0
 
         self.corpus, self.vocab_id, self.id_vocab = self._init_corpus(corpus)
-        self.words = [WordData(v,m=m) for v in vocab_id.items()]
+        self.words = [WordData(self.id_vocab[n],m=m) for n in range(len(self.id_vocab))]
 
     def _init_corpus(self, c):
 
@@ -88,11 +89,12 @@ class BWV:
             vocab_id = {}
             id_vocab = {}
             index = 0
-            for word in raw_text:
-                if word not in vocab_id:
-                    vocab_id[word] = index
-                    id_vocab[index] = word
-                    index += 1
+            for d in c:
+                for word in d:
+                    if word not in vocab_id:
+                        vocab_id[word] = index
+                        id_vocab[index] = word
+                        index += 1
             return vocab_id, id_vocab
 
         c = [clean(i) for i in c]
@@ -103,22 +105,24 @@ class BWV:
 
         training_data = {}
 
-        # positive examples
-        for text_i, word in enumerate(text):
-            word_i = self.vocab_id[word]
-            if word_i not in training_data:
-                training_data[word_i] = {}
+        for text in self.corpus:
+            # positive examples
+            for text_i, word in enumerate(text):
+                word_i = self.vocab_id[word]
+                if word_i not in training_data:
+                    training_data[word_i] = {}
 
-            start_window = max(0, text_i - window_size)
-            end_window = min(len(text), text_i + window_size + 1)
+                start_window = max(0, text_i - window_size)
+                end_window = min(len(text), text_i + window_size + 1)
 
-            for text_j in range(start_window, end_window):
-                word_j = self.vocab_id[text[text_j]]
-                if text_i != text_j:
-                    training_data[word_i][word_j] = training_data[word_i].get(word_j, 0) + 1
+                for text_j in range(start_window, end_window):
+                    word_j = self.vocab_id[text[text_j]]
+                    if text_i != text_j:
+                        training_data[word_i][word_j] = training_data[word_i].get(word_j, 0) + 1
 
         # negative_examples
-        for word_i in tqdm(training_data.keys()):
+        text = [t for i in self.corpus for t in i]
+        for word_i in training_data.keys():
 
             found = 0
             positive_samples = sum(training_data[word_i].values())
@@ -136,8 +140,8 @@ class BWV:
         beta = 1
         if self.epoch > self.n_without_stochastic_update: beta = (self.epoch-self.n_without_stochastic_update) ** (-1 * self.gamma)
 
-        training_data = get_data()
-        error = 0
+        training_data = self.get_training_set()
+        total_change = 0
 
         for i,j_dict in tqdm(training_data.items()):
 
@@ -155,10 +159,10 @@ class BWV:
                 var_wjv = np.expand_dims(np.diagonal(wj.covariance_v), axis=1)
                 xi = np.matmul(xi_ui.T, (var_wjv + np.square(wj.mean_v)))
                 xi = np.sqrt(xi)
-                lambda_xi = (0.5 / xi) * (sigmoid(xi) - 0.5)
+                lambda_xi = float((0.5 / xi) * (sigmoid(xi) - 0.5))
 
                 eq = wj.covariance_v + np.matmul(wj.mean_v, wj.mean_v.T)
-                wi.P_u_new += abs(d) * (2 * lambda_xi * eq + tau)
+                wi.P_u_new += abs(d) * (2 * lambda_xi * eq)
                 wi.R_u_new += 0.5 * d * wj.mean_v
 
                 # for v
@@ -168,27 +172,29 @@ class BWV:
                 lambda_xi = (0.5 / xi) * (sigmoid(xi) - 0.5)
 
                 eq = wj.covariance_u + np.matmul(wj.mean_u, wj.mean_u.T)
-                wi.P_v_new += abs(d) * (2 * lambda_xi * eq + tau)
+                wi.P_v_new += abs(d) * (2 * lambda_xi * eq)
                 wi.R_v_new += 0.5 * d * wj.mean_u
 
-            e += np.linalg.norm(wi.R_u_new - wi.R_u)
+            total_change += np.linalg.norm(wi.R_u_new - wi.R_u)
+
+            wi.P_u_new += self.tau
+            wi.P_v_new += self.tau
             wi.u_parameter_update(beta)
             wi.v_parameter_update(beta)
 
-        print(e / len(words))
+        print(total_change / len(self.words))
         self.most_similar(2, prnt=5)
+        self.epoch += 1
         time.sleep(0.1)
 
     def cosine_similarity(self, i, j):
-        i = self.words[i]
-        j = self.words[j]
         # calculate cosine similarities.
         m_y = np.matmul(i.mean_u.T, j.mean_u)
         m_y = m_y / (np.linalg.norm(i.mean_u) * np.linalg.norm(j.mean_u))
         var_y = np.matrix.trace(np.matmul(i.covariance_u, j.covariance_u))
         var_y += np.matmul(np.matmul(i.mean_u.T, i.covariance_u), i.mean_u)
         var_y += np.matmul(np.matmul(j.mean_u.T, j.covariance_u), j.mean_u)
-        # var_y = var_y / (np.linalg.norm(i.mean_u) * np.linalg.norm(j.mean_u))
+        var_y = var_y / (np.linalg.norm(i.mean_u) * np.linalg.norm(j.mean_u))
         return float(m_y), float(var_y)
 
     def most_similar(self, i, prnt=None):
@@ -197,7 +203,7 @@ class BWV:
         info = []
         for wj in self.words:
             if wi != wj:
-                info.append((wj.text, cosine_similarity(wi,wj)))
+                info.append((wj.text, self.cosine_similarity(wi,wj)))
         info.sort(key=lambda x: x[1][0], reverse=True)
 
         if prnt:
