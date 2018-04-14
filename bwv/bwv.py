@@ -63,88 +63,129 @@ class WordData:
         self.P_v_new = np.zeros((self.vector_size,self.vector_size))
 
 class BWV:
-    def __init__(self, corpus, m=40, tau=1.0, gamma=0.7, n_without_stochastic_update=5):
+    def __init__(self, corpus, m=50, tau=1.0, gamma=0.7, n_without_stochastic_update=5, vocab_size=20000, sample=0.001):
 
         self.m = m
         self.tau = tau * np.identity(m)
         self.gamma = gamma
         self.n_without_stochastic_update = n_without_stochastic_update
         self.epoch = 0
+        self.vocab_size = vocab_size
+        self.sample = sample
 
-        self.corpus, self.vocab_id, self.id_vocab = self._init_corpus(corpus)
-        self.words = [WordData(self.id_vocab[n],m=m) for n in range(len(self.id_vocab))]
+        self.corpus, self.vocab_id, self.id_vocab, self.vocab_discard_prob, self.vocab_negative_sample = self._init_corpus(corpus)
+        self.words = [WordData(self.id_vocab[n], m=m) for n in range(len(self.id_vocab))]
 
-    def _init_corpus(self, c):
+    def _init_corpus(self, c, threshold=1):
 
-        def clean(t):
-            t = re.sub(r'\s+', ' ', t) # remove extra spacing
-            t = t.lower() # lowercase
-            t = re.sub(r'[^a-zA-Z\d\s-]', '', t) # keep al-num characters and hyphens
-            t = t.strip()
-            t = t.split()
-            return t
+        def process_doc(txt):
+            txt = txt.replace('\n', ' ').strip().lower()
+            txt = txt.replace('.', ' . ')
+            txt = txt.replace('  ', ' ')
+            txt = re.sub(r'[^a-z0-9 \-\.]', '', txt)
+            txt = txt.split('.')
+            txt = [i.split(' ') for i in txt]
+            txt = [[j for j in i if j != ''] for i in txt if len(i) > 1]
+            text = []
+            for sentence in txt:
+                s = []
+                for word in sentence:
+                    try:
+                        int(word)
+                    except:
+                        s.append(word)
+                text.append(s)
+            return text
 
-        # c should be a list of lists at this point.
-        def gen_vocab(c):
-            vocab_id = {}
-            id_vocab = {}
-            index = 0
-            for d in c:
-                for word in d:
-                    if word not in vocab_id:
-                        vocab_id[word] = index
-                        id_vocab[index] = word
-                        index += 1
-            return vocab_id, id_vocab
+        docs = [process_doc(d) for d in c]
+        vocab_freq = {}
+        for doc in docs:
+            for sentence in doc:
+                for word in sentence:
+                    vocab_freq[word] = vocab_freq.get(word, 0) + 1
 
-        c = [clean(i) for i in c]
-        vocab_id, id_vocab = gen_vocab(c)
-        return c, vocab_id, id_vocab
+        vocab_freq = list(vocab_freq.items())
+        vocab_freq.sort(key=lambda x: x[1], reverse=True)
+        vocab_freq = vocab_freq[:self.vocab_size]
+        vocab_freq = dict(vocab_freq)
+
+        vocab_ix = {}
+        ix_vocab = {}
+        ix = 0
+        for v in vocab_freq.keys():
+            vocab_ix[v] = ix
+            ix_vocab[ix] = v
+            ix += 1
+
+        # remove uncommon words from corpus.
+        docs = [[[j for j in i if j in vocab_ix] for i in doc] for doc in docs]
+        docs = [[i for i in doc if len(i) > 1] for doc in docs]
+
+        # unigram probabilities
+        s = sum([sum([len(sentence) for sentence in doc]) for doc in docs])
+        vocab_freq = {k:v / s for k,v in vocab_freq.items()}
+
+        disc_prob = lambda x: (np.sqrt(x / self.sample) + 1) * self.sample / x
+        vocab_discard_prob = {k:disc_prob(v) for k,v in vocab_freq.items()}
+
+        prob = lambda x: x ** 0.75
+        vocab_negative_sample = {k:prob(v) for k,v in vocab_freq.items()}
+        s = sum(vocab_negative_sample.values())
+        vocab_negative_sample = {k: v/s for k,v in vocab_negative_sample.items()}
+
+        return docs, vocab_ix, ix_vocab, vocab_discard_prob, vocab_negative_sample
 
     def get_training_set(self, window_size=4, neg_pos_ratio=1):
 
-        training_data = {}
+        positive_examples = {}
+        for doc in self.corpus:
+            for sentence in doc:
 
-        for text in self.corpus:
-            # positive examples
-            for text_i, word in enumerate(text):
-                word_i = self.vocab_id[word]
-                if word_i not in training_data:
-                    training_data[word_i] = {}
+                # randomly discard common words
+                sw = list(set(sentence))
+                sample = np.random.uniform(0.0, 1.0, size=(len(sw),))
+                for w, p in zip(sw,sample):
+                    if p > self.vocab_discard_prob[w]:
+                        sentence = [s for s in sentence if s != w]
 
-                start_window = max(0, text_i - window_size)
-                end_window = min(len(text), text_i + window_size + 1)
+                # compute positive examples
+                for i,word in enumerate(sentence):
+                    if word not in positive_examples:
+                        positive_examples[word] = {}
 
-                for text_j in range(start_window, end_window):
-                    word_j = self.vocab_id[text[text_j]]
-                    if text_i != text_j:
-                        training_data[word_i][word_j] = training_data[word_i].get(word_j, 0) + 1
+                    start = max(0, i-window_size)
+                    end = min(len(sentence), i+window_size+1)
 
-        # negative_examples
-        text = [t for i in self.corpus for t in i]
-        for word_i in training_data.keys():
+                    for j in range(start, end):
+                        if j != i:
+                            positive_examples[word][sentence[j]] = positive_examples[word].get(sentence[j], 0) + 1
 
-            found = 0
-            positive_samples = sum(training_data[word_i].values())
+        vocab_set = list(self.vocab_id.keys())
+        negative_examples = {}
+        for word,value in dict(positive_examples).items():
+            # pos_set = set(value.keys())
+            # neg_set = list(vocab_set.difference(pos_set))
+            # # the comment code slows sampling down but is supposed to improve
+            # # quality over uniform random number selection.
+            # p = [self.vocab_negative_sample[w] for w in neg_set]
+            # s = sum(p)
+            # p = [i/s for i in p]
+            samples = np.random.choice(a=vocab_set, size=int(sum(value.values())*neg_pos_ratio)) # p=p
 
-            while found < neg_pos_ratio * positive_samples:
-                neg_w = random.choice(text)
-                neg_i = self.vocab_id[neg_w]
-                if (neg_i not in training_data[word_i]) or (training_data[word_i][neg_i] < 0):
-                    training_data[word_i][neg_i] = training_data[word_i].get(neg_i, 0) - 1
-                    found += 1
+            for w in samples:
+                positive_examples[word][w] = positive_examples[word].get(w, 0) - 1
 
-        return training_data
+        return positive_examples
 
-    def train(self):
+    def train(self, window_size=4):
         beta = 1
         if self.epoch > self.n_without_stochastic_update: beta = (self.epoch-self.n_without_stochastic_update) ** (-1 * self.gamma)
 
-        training_data = self.get_training_set()
+        training_data = self.get_training_set(window_size=window_size)
         total_change = 0
 
         for i,j_dict in tqdm(training_data.items()):
-
+            i = self.vocab_id[i]
             wi = self.words[i]
 
             var_wiu = np.expand_dims(np.diagonal(wi.covariance_u), axis=1)
@@ -153,6 +194,7 @@ class BWV:
             xi_vi = ((var_wiv) + np.square(wi.mean_v))
 
             for j, d in j_dict.items():
+                j = self.vocab_id[j]
                 wj = self.words[j]
 
                 # for u
