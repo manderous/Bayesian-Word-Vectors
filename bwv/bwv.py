@@ -161,7 +161,6 @@ class BWV:
                             positive_examples[word][sentence[j]] = positive_examples[word].get(sentence[j], 0) + 1
 
         vocab_set = list(self.vocab_id.keys())
-        negative_examples = {}
         for word,value in dict(positive_examples).items():
             # pos_set = set(value.keys())
             # neg_set = list(vocab_set.difference(pos_set))
